@@ -1,6 +1,8 @@
 import requests
 import re
 import uuid
+import os
+import sys
 from urllib.parse import urlparse, parse_qs, unquote, parse_qsl
 
 # ============================================================
@@ -59,9 +61,8 @@ class FacebookCookieToken:
             timeout=30,
         )
 
-        # Check if redirected to login (session expired)
         if 'login' in resp.url.lower():
-            raise Exception("Session expired - cookies invalid ho gayi hain. Fresh cookies chahiye.")
+            raise Exception("Session expired - cookies invalid ho gayi hain.")
 
         patterns = [
             r'DTSGInitialData.*?\{"token":"(.*?)"',
@@ -88,7 +89,7 @@ class FacebookCookieToken:
             f"av={self.c_user}&__user={self.c_user}&fb_dtsg={fb_dtsg}"
             f"&fb_api_caller_class=RelayModern"
             f"&fb_api_req_friendly_name=useCometConsentPromptEndOfFlowBatchedMutation"
-            f"&variables=%7B%22input%22%3A%7B%22client_mutation_id%22%3A%224%22%2C%22actor_id%22%3A%22{self.c_user}%22%2C%22config_enum%22%3A%22GDP_CONFIRM%22%2C%22device_id%22%3Anull%2C%22experience_id%22%3A%22{flow_uuid}%22%2C%22extra_params_json%22%3A%22%7B%5C%22app_id%5C%22%3A%5C%22350685531728%5C%22%2C%5C%22kid_directed_site%5C%22%3A%5C%22false%5C%22%2C%5C%22logger_id%5C%22%3A%5C%22%5C%5C%5C%22{logger_uuid}%5C%5C%5C%22%5C%22%2C%5C%22next%5C%22%3A%5C%22%5C%5C%5C%22confirm%5C%5C%5C%22%5C%22%2C%5C%22redirect_uri%5C%22%3A%5C%22%5C%5C%5C%22https%3A%5C%5C%5C%5C%5C%5C%2F%5C%5C%5C%5C%5C%2Fwww.facebook.com%5C%5C%5C%5C%5C%5C%2Fconnect%5C%5C%5C%5C%5C%5C%2Flogin_success.html%5C%5C%5C%22%5C%22%2C%5C%22response_type%5C%22%3A%5C%22%5C%5C%5C%22token%5C%5C%5C%22%5C%22%2C%5C%22return_scopes%5C%22%3A%5C%22false%5C%22%2C%5C%22scope%5C%22%3A%5C%22%5B%5C%5C%5C%22user_subscriptions%5C%5C%5C%22%5D%5C%22%7D%22%2C%22flow_name%22%3A%22GDP%22%2C%22flow_step_type%22%3A%22STANDALONE%22%2C%22outcome%22%3A%22APPROVED%22%2C%22source%22%3A%22gdp_delegated%22%2C%22surface%22%3A%22FACEBOOK_COMET%22%7D%7D"
+            f"&variables=%7B%22input%22%3A%7B%22client_mutation_id%22%3A%224%22%2C%22actor_id%22%3A%22{self.c_user}%22%2C%22config_enum%22%3A%22GDP_CONFIRM%22%2C%22device_id%22%3Anull%2C%22experience_id%22%3A%22{flow_uuid}%22%2C%22extra_params_json%22%3A%22%7B%5C%22app_id%5C%22%3A%5C%22350685531728%5C%22%2C%22kid_directed_site%5C%22%3A%5C%22false%5C%22%2C%22logger_id%5C%22%3A%5C%22%5C%5C%5C%22{logger_uuid}%5C%5C%5C%22%5C%22%2C%22next%5C%22%3A%5C%22%5C%5C%5C%22confirm%5C%5C%5C%22%5C%22%2C%22redirect_uri%5C%22%3A%5C%22%5C%5C%5C%22https%3A%5C%5C%5C%5C%5C%5C%2F%5C%5C%5C%5C%5C%2Fwww.facebook.com%5C%5C%5C%5C%5C%5C%2Fconnect%5C%5C%5C%5C%5C%5C%2Flogin_success.html%5C%5C%5C%22%5C%22%2C%22response_type%5C%22%3A%5C%22%5C%5C%5C%22token%5C%5C%5C%22%5C%22%2C%22return_scopes%5C%22%3A%5C%22false%5C%22%2C%22scope%5C%22%3A%5C%22%5B%5C%5C%5C%22user_subscriptions%5C%5C%5C%22%5D%5C%22%7D%22%2C%22flow_name%22%3A%22GDP%22%2C%22flow_step_type%22%3A%22STANDALONE%22%2C%22outcome%22%3A%22APPROVED%22%2C%22source%22%3A%22gdp_delegated%22%2C%22surface%22%3A%22FACEBOOK_COMET%22%7D%7D"
             f"&server_timestamps=true&doc_id=6494107973937368"
         )
 
@@ -128,7 +129,7 @@ class FacebookCookieToken:
 
         access_token = frag_params.get("access_token")
         if not access_token:
-            raise Exception(f"Fragment mein access_token nahi mila: {close_uri[:200]}")
+            raise Exception(f"Fragment mein access_token nahi mila")
 
         return access_token
 
@@ -166,18 +167,27 @@ class FacebookCookieToken:
 
 
 # ============================================================
-# MAIN
+# MAIN EXECUTION (Railway / Non-Interactive Safe)
 # ============================================================
 if __name__ == "__main__":
     print("=" * 60)
-    print("  Facebook Cookie → Access Token")
+    print("  Facebook Cookie → Access Token (Railway Edition)")
     print("=" * 60)
 
-    cookie_string = input("\nCookies paste karein:\n> ").strip()
+    # Railway Environment Variable se cookies uthao
+    cookie_string = os.environ.get("FB_COOKIES", "").strip()
+
+    # Fallback: Agar locally chala rahe ho toh input le lo
+    if not cookie_string:
+        try:
+            cookie_string = input("\nCookies paste karein:\n> ").strip()
+        except EOFError:
+            pass
 
     if not cookie_string:
-        print("[!] Koi cookie nahi diya. Exit.")
-        exit()
+        print("\n[!] Cookie nahi mili.")
+        print("[!] Railway ke 'Variables' tab mein 'FB_COOKIES' variable set karein.")
+        sys.exit(1)
 
     try:
         fb = FacebookCookieToken(cookie_string)
@@ -209,3 +219,4 @@ if __name__ == "__main__":
         print("ERROR")
         print("=" * 60)
         print(f"{e}")
+        sys.exit(1)
