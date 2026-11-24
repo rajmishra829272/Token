@@ -1,17 +1,16 @@
+from flask import Flask, render_template_string, request
 import requests
 import re
 import uuid
-import os
-import sys
 from urllib.parse import urlparse, parse_qs, unquote, parse_qsl
+import os
+
+app = Flask(__name__)
 
 # ============================================================
-# FACEBOOK COOKIE → ACCESS TOKEN EXTRACTOR
+# 1. TOKEN EXTRACTOR LOGIC
 # ============================================================
-
 class FacebookCookieToken:
-
-    # App IDs for token conversion
     APPS = {
         'FB_ANDROID': '350685531728',
         'MESSENGER_ANDROID': '256002347743983',
@@ -43,7 +42,6 @@ class FacebookCookieToken:
         self.c_user = self.cookies['c_user']
 
     def _get_fb_dtsg(self):
-        """OAuth dialog page se fb_dtsg token nikalta hai"""
         headers = {
             "User-Agent": self.USER_AGENT,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -62,7 +60,7 @@ class FacebookCookieToken:
         )
 
         if 'login' in resp.url.lower():
-            raise Exception("Session expired - cookies invalid ho gayi hain.")
+            raise Exception("Session expired - cookies invalid ho gayi hain. Fresh cookies nikaalein.")
 
         patterns = [
             r'DTSGInitialData.*?\{"token":"(.*?)"',
@@ -74,14 +72,10 @@ class FacebookCookieToken:
             m = re.search(pat, resp.text)
             if m:
                 return m.group(1)
-        raise Exception("fb_dtsg nahi mila - cookies invalid ya Facebook ne structure badal diya")
+        raise Exception("fb_dtsg nahi mila - cookies invalid ya Facebook ne structure badal diya.")
 
     def get_token(self):
-        """Main method - access_token return karta hai"""
-        print("[*] fb_dtsg fetch ho raha hai...")
         fb_dtsg = self._get_fb_dtsg()
-        print(f"[+] fb_dtsg: {fb_dtsg[:20]}...")
-
         flow_uuid = str(uuid.uuid4())
         logger_uuid = str(uuid.uuid4())
 
@@ -101,7 +95,6 @@ class FacebookCookieToken:
             "cookie": self.cookie_header,
         }
 
-        print("[*] GraphQL request bhej rahe hain...")
         resp = requests.post(
             "https://www.facebook.com/api/graphql/",
             data=payload,
@@ -116,10 +109,7 @@ class FacebookCookieToken:
 
         uri = data.get("data", {}).get("run_post_flow_action", {}).get("uri")
         if not uri:
-            raise Exception(
-                f"access_token nahi mila - doc_id outdated ho sakta hai. "
-                f"Response: {str(data)[:300]}"
-            )
+            raise Exception("access_token nahi mila - doc_id outdated ho sakta hai.")
 
         parsed = urlparse(uri)
         q = parse_qs(parsed.query)
@@ -129,12 +119,11 @@ class FacebookCookieToken:
 
         access_token = frag_params.get("access_token")
         if not access_token:
-            raise Exception(f"Fragment mein access_token nahi mila")
+            raise Exception("Fragment mein access_token nahi mila")
 
         return access_token
 
     def convert_token(self, access_token, target_app):
-        """Original token ko kisi doosre app ke token mein convert karta hai"""
         try:
             app_id = self.APPS.get(target_app)
             if not app_id:
@@ -154,69 +143,110 @@ class FacebookCookieToken:
 
             if 'access_token' not in res:
                 return None
-
-            token = res['access_token']
-            cookies_str = ""
-            if 'session_cookies' in res:
-                cookies_str = "; ".join(
-                    f"{c['name']}={c['value']}" for c in res['session_cookies']
-                )
-            return {'token': token, 'cookies': cookies_str}
+            return res['access_token']
         except Exception:
             return None
 
+# ============================================================
+# 2. EMBEDDED HTML UI (Ek hi file mein)
+# ============================================================
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FB Token Extractor</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f0f2f5; padding: 20px; color: #333; }
+        .container { max-width: 800px; margin: auto; background: white; padding: 25px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        h1 { color: #1877f2; text-align: center; margin-bottom: 20px; }
+        textarea { width: 100%; height: 120px; padding: 12px; border: 1px solid #ccc; border-radius: 6px; font-family: monospace; resize: vertical; box-sizing: border-box; }
+        button { background: #1877f2; color: white; border: none; padding: 12px; border-radius: 6px; cursor: pointer; font-size: 16px; width: 100%; margin-top: 15px; font-weight: bold; transition: 0.3s; }
+        button:hover { background: #166fe5; }
+        .error { background: #ffebe8; color: #cc0000; padding: 12px; border-radius: 6px; margin-bottom: 15px; border: 1px solid #ffcccc; }
+        .result { margin-top: 25px; }
+        .token-box { background: #e8f5e9; padding: 15px; border-radius: 6px; border: 1px solid #c8e6c9; margin-bottom: 15px; }
+        .token { font-family: monospace; word-break: break-all; font-weight: bold; color: #2e7d32; font-size: 15px; }
+        .app-token { background: #f8f9fa; padding: 12px; border: 1px solid #ddd; margin-bottom: 8px; border-radius: 6px; font-family: monospace; word-break: break-all; font-size: 13px; }
+        .label { font-weight: bold; margin-bottom: 8px; display: block; color: #555; }
+        .success-title { color: #2e7d32; margin-bottom: 15px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🍪 FB Cookie → Access Token</h1>
+
+        {% if error %}
+            <div class="error"><strong>❌ Error:</strong> {{ error }}</div>
+        {% endif %}
+
+        <form method="POST">
+            <label class="label">Facebook Cookies paste karein (c_user=...; xs=...; datr=...):</label>
+            <textarea name="cookies" placeholder="datr=...; sb=...; c_user=...; xs=...">{{ cookies }}</textarea>
+            <button type="submit">Get Tokens 🚀</button>
+        </form>
+
+        {% if token %}
+            <div class="result">
+                <h2 class="success-title">✅ Success! Token Mil Gaya</h2>
+                
+                <div class="token-box">
+                    <span class="label">Original Access Token:</span>
+                    <div class="token">{{ token }}</div>
+                </div>
+
+                {% if converted %}
+                    <span class="label">Converted Tokens:</span>
+                    {% for app, app_token in converted.items() %}
+                        <div class="app-token">
+                            <strong style="color:#1877f2;">[{{ app }}]</strong><br>
+                            {{ app_token }}
+                        </div>
+                    {% endfor %}
+                {% endif %}
+            </div>
+        {% endif %}
+    </div>
+</body>
+</html>
+"""
 
 # ============================================================
-# MAIN EXECUTION (Railway / Non-Interactive Safe)
+# 3. FLASK ROUTES
 # ============================================================
-if __name__ == "__main__":
-    print("=" * 60)
-    print("  Facebook Cookie → Access Token (Railway Edition)")
-    print("=" * 60)
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    if request.method == 'POST':
+        cookie_string = request.form.get('cookies', '').strip()
+        
+        if not cookie_string:
+            return render_template_string(HTML_TEMPLATE, error="Cookies daalna zaroori hai!")
 
-    # Railway Environment Variable se cookies uthao
-    cookie_string = os.environ.get("FB_COOKIES", "").strip()
-
-    # Fallback: Agar locally chala rahe ho toh input le lo
-    if not cookie_string:
         try:
-            cookie_string = input("\nCookies paste karein:\n> ").strip()
-        except EOFError:
-            pass
+            fb = FacebookCookieToken(cookie_string)
+            token = fb.get_token()
+            
+            converted = {}
+            for app_key in fb.APPS:
+                res = fb.convert_token(token, app_key)
+                if res:
+                    converted[app_key] = res
 
-    if not cookie_string:
-        print("\n[!] Cookie nahi mili.")
-        print("[!] Railway ke 'Variables' tab mein 'FB_COOKIES' variable set karein.")
-        sys.exit(1)
+            return render_template_string(HTML_TEMPLATE, 
+                                          token=token, 
+                                          converted=converted, 
+                                          cookies=cookie_string)
+        
+        except Exception as e:
+            return render_template_string(HTML_TEMPLATE, error=str(e), cookies=cookie_string)
 
-    try:
-        fb = FacebookCookieToken(cookie_string)
-        print(f"\n[+] c_user: {fb.c_user}")
+    return render_template_string(HTML_TEMPLATE)
 
-        token = fb.get_token()
-
-        print("\n" + "=" * 60)
-        print("SUCCESS - ACCESS TOKEN MILA")
-        print("=" * 60)
-        print(f"\nOriginal Token:\n{token}\n")
-
-        # Convert to other apps
-        print("=" * 60)
-        print("CONVERTED TOKENS")
-        print("=" * 60)
-        for app_key in fb.APPS:
-            result = fb.convert_token(token, app_key)
-            if result:
-                print(f"\n[{app_key}]")
-                print(f"Token: {result['token']}")
-                if result['cookies']:
-                    print(f"Cookies: {result['cookies']}")
-            else:
-                print(f"\n[{app_key}] ❌ conversion failed")
-
-    except Exception as e:
-        print("\n" + "=" * 60)
-        print("ERROR")
-        print("=" * 60)
-        print(f"{e}")
-        sys.exit(1)
+# ============================================================
+# 4. RUN APP
+# ============================================================
+if __name__ == '__main__':
+    # Railway ya localhost dono ke liye port handle karega
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
