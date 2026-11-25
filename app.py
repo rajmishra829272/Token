@@ -2,8 +2,8 @@ from flask import Flask, render_template_string, request
 import requests
 import re
 import uuid
-from urllib.parse import urlparse, parse_qs, unquote, parse_qsl
 import os
+from urllib.parse import urlparse, parse_qs, unquote, parse_qsl
 
 app = Flask(__name__)
 
@@ -22,7 +22,27 @@ class FacebookCookieToken:
 
     USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/117.0.0.0 Safari/537.36")
+                  "Chrome/120.0.0.0 Safari/537.36")
+
+    def __init__(self, cookie_string):
+        self.cookies = self.parse_cookies(cookie_string)
+        if 'c_user' not in self.cookies or 'xs' not in self.cookies:
+            raise Exception("c_user ya xs cookie missing hai - invalid cookie string")
+            
+        self.cookie_header = "; ".join([f"{k}={v}" for k, v in self.cookies.items()])
+        self.c_user = self.cookies['c_user']
+        
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": self.USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cookie": self.cookie_header
+        })
 
     @staticmethod
     def parse_cookies(cookie_string):
@@ -34,37 +54,15 @@ class FacebookCookieToken:
                 cookies[k.strip()] = v.strip()
         return cookies
 
-    def __init__(self, cookie_string):
-        self.cookies = self.parse_cookies(cookie_string)
-        if 'c_user' not in self.cookies:
-            raise Exception("c_user cookie missing - invalid cookie string")
-        self.cookie_header = "; ".join([f"{k}={v}" for k, v in self.cookies.items()])
-        self.c_user = self.cookies['c_user']
-
     def _get_fb_dtsg(self):
-        headers = {
-            "User-Agent": self.USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Cookie": self.cookie_header,
-        }
-        resp = requests.get(
-            "https://www.facebook.com/v2.3/dialog/oauth",
-            params={
-                "redirect_uri": "fbconnect://success",
-                "response_type": "token,code",
-                "client_id": "356275264482347",
-            },
-            headers=headers,
-            timeout=30,
-        )
-
+        resp = self.session.get("https://www.facebook.com/", timeout=30)
         if 'login' in resp.url.lower():
             raise Exception("Session expired - cookies invalid ho gayi hain. Fresh cookies nikaalein.")
 
+        # fb_dtsg खोजने के लिए आधुनिक पैटर्न
         patterns = [
-            r'DTSGInitialData.*?\{"token":"(.*?)"',
-            r'"DTSGInitData",\[\],\{"token":"(.*?)"',
+            r'"DTSGInitialData",\[\],\{"token":"(.*?)"',
+            r'\["DTSGInitialData",\[\],\{"token":"(.*?)"',
             r'name="fb_dtsg"\s+value="([^"]+)"',
             r'"fb_dtsg":"([^"]+)"',
         ]
@@ -74,8 +72,25 @@ class FacebookCookieToken:
                 return m.group(1)
         raise Exception("fb_dtsg nahi mila - cookies invalid ya Facebook ne structure badal diya.")
 
+    def _get_doc_id(self):
+        """डायनामिक रूप से Facebook के JS से करंट doc_id खोजें"""
+        resp = self.session.get("https://www.facebook.com/", timeout=30)
+        
+        # mutation का नाम 'useCometConsentPromptEndOfFlowBatchedMutation' है
+        # हम queryID और queryName को मिलाकर doc_id खोजेंगे
+        pattern = r'"queryID":"(\d+)"[^}]*?"queryName":"useCometConsentPromptEndOfFlowBatchedMutation"'
+        m = re.search(pattern, resp.text)
+        
+        if m:
+            return m.group(1)
+            
+        # फ़ॉलबैक (अगर उपरोक्त विफल हो)
+        return "6494107973937368"
+
     def get_token(self):
         fb_dtsg = self._get_fb_dtsg()
+        doc_id = self._get_doc_id()
+        
         flow_uuid = str(uuid.uuid4())
         logger_uuid = str(uuid.uuid4())
 
@@ -84,18 +99,17 @@ class FacebookCookieToken:
             f"&fb_api_caller_class=RelayModern"
             f"&fb_api_req_friendly_name=useCometConsentPromptEndOfFlowBatchedMutation"
             f"&variables=%7B%22input%22%3A%7B%22client_mutation_id%22%3A%224%22%2C%22actor_id%22%3A%22{self.c_user}%22%2C%22config_enum%22%3A%22GDP_CONFIRM%22%2C%22device_id%22%3Anull%2C%22experience_id%22%3A%22{flow_uuid}%22%2C%22extra_params_json%22%3A%22%7B%5C%22app_id%5C%22%3A%5C%22350685531728%5C%22%2C%22kid_directed_site%5C%22%3A%5C%22false%5C%22%2C%22logger_id%5C%22%3A%5C%22%5C%5C%5C%22{logger_uuid}%5C%5C%5C%22%5C%22%2C%22next%5C%22%3A%5C%22%5C%5C%5C%22confirm%5C%5C%5C%22%5C%22%2C%22redirect_uri%5C%22%3A%5C%22%5C%5C%5C%22https%3A%5C%5C%5C%5C%5C%5C%2F%5C%5C%5C%5C%5C%2Fwww.facebook.com%5C%5C%5C%5C%5C%5C%2Fconnect%5C%5C%5C%5C%5C%5C%2Flogin_success.html%5C%5C%5C%22%5C%22%2C%22response_type%5C%22%3A%5C%22%5C%5C%5C%22token%5C%5C%5C%22%5C%22%2C%22return_scopes%5C%22%3A%5C%22false%5C%22%2C%22scope%5C%22%3A%5C%22%5B%5C%5C%5C%22user_subscriptions%5C%5C%5C%22%5D%5C%22%7D%22%2C%22flow_name%22%3A%22GDP%22%2C%22flow_step_type%22%3A%22STANDALONE%22%2C%22outcome%22%3A%22APPROVED%22%2C%22source%22%3A%22gdp_delegated%22%2C%22surface%22%3A%22FACEBOOK_COMET%22%7D%7D"
-            f"&server_timestamps=true&doc_id=6494107973937368"
+            f"&server_timestamps=true&doc_id={doc_id}"
         )
 
         headers = {
             "content-type": "application/x-www-form-urlencoded",
             "origin": "https://www.facebook.com",
-            "user-agent": self.USER_AGENT,
             "x-fb-friendly-name": "useCometConsentPromptEndOfFlowBatchedMutation",
-            "cookie": self.cookie_header,
+            "accept": "*/*",
         }
 
-        resp = requests.post(
+        resp = self.session.post(
             "https://www.facebook.com/api/graphql/",
             data=payload,
             headers=headers,
@@ -148,7 +162,7 @@ class FacebookCookieToken:
             return None
 
 # ============================================================
-# 2. EMBEDDED HTML UI (Ek hi file mein)
+# 2. EMBEDDED HTML UI
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -247,6 +261,5 @@ def index():
 # 4. RUN APP
 # ============================================================
 if __name__ == '__main__':
-    # Railway ya localhost dono ke liye port handle karega
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
